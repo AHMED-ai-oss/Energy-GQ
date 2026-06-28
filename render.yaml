@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: energy-detector-webhook
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: DB_PATH
+        value: data/signals.db
+    disk:
+      name: signals-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
