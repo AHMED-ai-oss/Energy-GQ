@@ -3,7 +3,7 @@
 ║   ENERGY DETECTOR — WEBHOOK SERVER                                          ║
 ║   Receives TradingView alerts, logs signals, sends Telegram notifications   ║
 ║   Tracks D+1 performance and generates weekly optimization reports          ║
-║   Designed by Manus AI — Deploy on Render.com (free tier)                  ║
+║   Extended with MARKET LAB research endpoint                                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -20,33 +20,30 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION — set these as Environment Variables on Render.com
-# ─────────────────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")       # From @BotFather
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")     # From @userinfobot
-WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "energy_detector_2026")  # Security key
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "energy_detector_2026")
 DB_PATH          = os.getenv("DB_PATH", "data/signals.db")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FASTAPI APP
-# ─────────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Energy Detector Webhook", version="1.0")
+app = FastAPI(title="Energy Detector Webhook", version="1.1")
 scheduler = AsyncIOScheduler()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DATABASE SETUP
-# ─────────────────────────────────────────────────────────────────────────────
+def to_float(value):
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
 def init_db():
     os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS signals (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +64,43 @@ def init_db():
             notes         TEXT
         )
     """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS marketlab (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lab_id TEXT,
+            received_at TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            exchange TEXT,
+            interval TEXT,
+            tv_time TEXT,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            g1 REAL,
+            g2 REAL,
+            g3 REAL,
+            g23_clean_first REAL,
+            relvol REAL,
+            compression REAL,
+            absorption REAL,
+            shockgate REAL,
+            break20 REAL,
+            strongclose REAL,
+            quality REAL,
+            lumira_now REAL,
+            lumira_recent3 REAL,
+            lumira_recent5 REAL,
+            lumira_before_g23_5 REAL,
+            g23_before_lumira_5 REAL,
+            lumira_same_g23 REAL,
+            score REAL,
+            notes TEXT
+        )
+    """)
+
     conn.commit()
     conn.close()
     log.info("Database initialized: %s", DB_PATH)
@@ -92,6 +126,63 @@ def insert_signal(data: dict) -> int:
     conn.close()
     return signal_id
 
+def insert_marketlab(data: dict) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    received_at = datetime.utcnow().isoformat()
+    ticker = data.get("ticker", "UNKNOWN").upper()
+
+    c.execute("""
+        INSERT INTO marketlab (
+            received_at, ticker, exchange, interval, tv_time,
+            open, high, low, close, volume,
+            g1, g2, g3, g23_clean_first, relvol,
+            compression, absorption, shockgate, break20, strongclose, quality,
+            lumira_now, lumira_recent3, lumira_recent5,
+            lumira_before_g23_5, g23_before_lumira_5, lumira_same_g23,
+            score
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        received_at,
+        ticker,
+        data.get("exchange", ""),
+        data.get("interval", ""),
+        data.get("time", ""),
+        to_float(data.get("open")),
+        to_float(data.get("high")),
+        to_float(data.get("low")),
+        to_float(data.get("close")),
+        to_float(data.get("volume")),
+        to_float(data.get("G1")),
+        to_float(data.get("G2")),
+        to_float(data.get("G3")),
+        to_float(data.get("G23CleanFirst")),
+        to_float(data.get("RelVol")),
+        to_float(data.get("Compression")),
+        to_float(data.get("Absorption")),
+        to_float(data.get("ShockGate")),
+        to_float(data.get("Break20")),
+        to_float(data.get("StrongClose")),
+        to_float(data.get("Quality")),
+        to_float(data.get("LumiraNow")),
+        to_float(data.get("LumiraRecent3")),
+        to_float(data.get("LumiraRecent5")),
+        to_float(data.get("LumiraBeforeG23_5")),
+        to_float(data.get("G23BeforeLumira_5")),
+        to_float(data.get("LumiraSameG23")),
+        to_float(data.get("Score")),
+    ))
+
+    signal_id = c.lastrowid
+    lab_id = f"LAB-{signal_id:06d}"
+    c.execute("UPDATE marketlab SET lab_id=? WHERE id=?", (lab_id, signal_id))
+
+    conn.commit()
+    conn.close()
+    return signal_id
+
 def get_pending_d1_signals():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -105,8 +196,7 @@ def get_pending_d1_signals():
     conn.close()
     return rows
 
-def update_d1_performance(signal_id: int, price_d1_open: float, price_d1_close: float,
-                           price_alert: float):
+def update_d1_performance(signal_id: int, price_d1_open: float, price_d1_close: float, price_alert: float):
     gain_d1 = ((price_d1_close - price_alert) / price_alert * 100) if price_alert else None
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -143,9 +233,6 @@ def get_all_signals(limit=50):
     conn.close()
     return rows
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TELEGRAM NOTIFIER
-# ─────────────────────────────────────────────────────────────────────────────
 async def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram not configured — skipping notification")
@@ -162,9 +249,6 @@ async def send_telegram(message: str):
     except Exception as e:
         log.error("Telegram error: %s", e)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# D+1 PERFORMANCE TRACKER (runs daily at market close ~4:30 PM ET = 21:30 UTC)
-# ─────────────────────────────────────────────────────────────────────────────
 async def check_d1_performance():
     log.info("Running D+1 performance check...")
     pending = get_pending_d1_signals()
@@ -176,27 +260,20 @@ async def check_d1_performance():
     for signal_id, ticker, price_alert, received_at in pending:
         try:
             stock = yf.Ticker(ticker)
-            hist  = stock.history(period="5d", auto_adjust=True)
+            hist = stock.history(period="5d", auto_adjust=True)
             if hist.empty or len(hist) < 1:
                 continue
             latest = hist.iloc[-1]
-            d1_open  = float(latest["Open"])
+            d1_open = float(latest["Open"])
             d1_close = float(latest["Close"])
             update_d1_performance(signal_id, d1_open, d1_close, price_alert)
-            gain = ((d1_close - price_alert) / price_alert * 100) if price_alert else 0
-            log.info("D+1 checked: %s | Alert: $%.2f | D+1 Close: $%.2f | Gain: %.2f%%",
-                     ticker, price_alert, d1_close, gain)
             checked += 1
         except Exception as e:
             log.error("D+1 check failed for %s: %s", ticker, e)
 
-    log.info("D+1 check complete: %d signals updated", checked)
     if checked > 0:
         await send_telegram(f"<b>D+1 Performance Check Complete</b>\n{checked} signals updated.\nUse /report for weekly summary.")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WEEKLY REPORT GENERATOR (runs every Sunday at 6 PM UTC)
-# ─────────────────────────────────────────────────────────────────────────────
 async def send_weekly_report():
     log.info("Generating weekly performance report...")
     rows = get_weekly_stats()
@@ -204,14 +281,14 @@ async def send_weekly_report():
         await send_telegram("<b>Weekly Report</b>\nNo completed signals this week.")
         return
 
-    total       = len(rows)
-    profitable  = sum(1 for r in rows if r[3] and r[3] > 0)
-    losing      = sum(1 for r in rows if r[3] and r[3] <= 0)
-    gains       = [r[3] for r in rows if r[3] is not None]
-    avg_gain    = sum(gains) / len(gains) if gains else 0
-    best        = max(rows, key=lambda r: r[3] if r[3] else -999)
-    worst       = min(rows, key=lambda r: r[3] if r[3] else 999)
-    hit_rate    = (profitable / total * 100) if total > 0 else 0
+    total = len(rows)
+    profitable = sum(1 for r in rows if r[3] and r[3] > 0)
+    losing = sum(1 for r in rows if r[3] and r[3] <= 0)
+    gains = [r[3] for r in rows if r[3] is not None]
+    avg_gain = sum(gains) / len(gains) if gains else 0
+    best = max(rows, key=lambda r: r[3] if r[3] else -999)
+    worst = min(rows, key=lambda r: r[3] if r[3] else 999)
+    hit_rate = (profitable / total * 100) if total > 0 else 0
 
     msg = f"""<b>ENERGY DETECTOR — WEEKLY REPORT</b>
 Week ending: {datetime.utcnow().strftime('%Y-%m-%d')}
@@ -234,20 +311,17 @@ Week ending: {datetime.utcnow().strftime('%Y-%m-%d')}
     msg += "\n\n<i>Send /optimize for script improvement suggestions</i>"
     await send_telegram(msg)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OPTIMIZATION ANALYZER
-# ─────────────────────────────────────────────────────────────────────────────
 def analyze_for_optimization():
     rows = get_weekly_stats()
     if len(rows) < 5:
         return "Not enough data yet (need at least 5 completed signals)."
 
-    gains   = [(r[0], r[1], r[3]) for r in rows if r[3] is not None]
+    gains = [(r[0], r[1], r[3]) for r in rows if r[3] is not None]
     winners = [g for g in gains if g[2] > 0]
-    losers  = [g for g in gains if g[2] <= 0]
+    losers = [g for g in gains if g[2] <= 0]
 
     avg_winner_score = sum(g[1] for g in winners) / len(winners) if winners else 0
-    avg_loser_score  = sum(g[1] for g in losers)  / len(losers)  if losers  else 0
+    avg_loser_score = sum(g[1] for g in losers) / len(losers) if losers else 0
 
     suggestions = []
 
@@ -262,15 +336,11 @@ def analyze_for_optimization():
 
     return "\n".join(f"• {s}" for s in suggestions)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# API ROUTES
-# ─────────────────────────────────────────────────────────────────────────────
-
 @app.on_event("startup")
 async def startup():
     init_db()
     scheduler.add_job(check_d1_performance, CronTrigger(hour=21, minute=30))
-    scheduler.add_job(send_weekly_report,   CronTrigger(day_of_week="sun", hour=18))
+    scheduler.add_job(send_weekly_report, CronTrigger(day_of_week="sun", hour=18))
     scheduler.start()
     log.info("Energy Detector Webhook Server started.")
     await send_telegram("<b>Energy Detector Webhook Server is ONLINE</b>\nReady to receive TradingView alerts.")
@@ -279,10 +349,8 @@ async def startup():
 async def shutdown():
     scheduler.shutdown()
 
-# ── MAIN WEBHOOK ENDPOINT ─────────────────────────────────────────────────────
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
-    # Verify secret key in header
     secret = request.headers.get("X-Webhook-Secret", "")
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
@@ -293,20 +361,17 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    ticker     = data.get("ticker", "UNKNOWN").upper()
-    price      = data.get("price")
-    score      = data.get("score")
-    interval   = data.get("interval", "")
-    exchange   = data.get("exchange", "")
-    tv_time    = data.get("time", "")
+    ticker = data.get("ticker", "UNKNOWN").upper()
+    price = data.get("price")
+    score = data.get("score")
+    interval = data.get("interval", "")
+    exchange = data.get("exchange", "")
+    tv_time = data.get("time", "")
 
-    log.info("ALERT RECEIVED: %s | Score: %s | Price: %s | Interval: %s",
-             ticker, score, price, interval)
+    log.info("ALERT RECEIVED: %s | Score: %s | Price: %s | Interval: %s", ticker, score, price, interval)
 
-    # Save to database
     signal_id = insert_signal(data)
 
-    # Send Telegram notification (in background)
     score_bar = "█" * int((score or 0) / 10) + "░" * (10 - int((score or 0) / 10))
     tg_msg = f"""<b>PRIME ENERGY ALERT</b>
 <b>Ticker:</b> {ticker} ({exchange})
@@ -322,14 +387,50 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
 
     return JSONResponse({"status": "ok", "signal_id": signal_id, "ticker": ticker})
 
-# ── DASHBOARD ─────────────────────────────────────────────────────────────────
+@app.post("/marketlab")
+async def receive_marketlab(request: Request, background_tasks: BackgroundTasks):
+    try:
+        body = await request.body()
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    signal_id = insert_marketlab(data)
+    lab_id = f"LAB-{signal_id:06d}"
+
+    ticker = data.get("ticker", "UNKNOWN").upper()
+    close = data.get("close", "")
+    interval = data.get("interval", "")
+    score = data.get("Score", "")
+    relvol = data.get("RelVol", "")
+    lumira5 = data.get("LumiraRecent5", "")
+    quality = data.get("Quality", "")
+
+    log.info("MARKET LAB RECEIVED: %s | %s | Score: %s | RelVol: %s", ticker, lab_id, score, relvol)
+
+    tg_msg = f"""<b>MARKET LAB ALERT</b>
+<b>ID:</b> {lab_id}
+<b>Ticker:</b> {ticker}
+<b>Close:</b> {close}
+<b>Interval:</b> {interval}
+<b>Score:</b> {score}
+<b>RelVol:</b> {relvol}
+<b>LumiraRecent5:</b> {lumira5}
+<b>Quality:</b> {quality}
+
+<i>Research record saved.</i>"""
+
+    background_tasks.add_task(send_telegram, tg_msg)
+
+    return JSONResponse({"status": "ok", "lab_id": lab_id, "ticker": ticker})
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     signals = get_all_signals(50)
     rows_html = ""
     for s in signals:
         sid, ts, ticker, interval, price, score, gain, checked = s
-        gain_str  = f"{gain:+.1f}%" if gain is not None else "pending"
+        gain_str = f"{gain:+.1f}%" if gain is not None else "pending"
         gain_color = "green" if (gain and gain > 0) else ("red" if (gain and gain <= 0) else "gray")
         checked_str = "Yes" if checked else "No"
         rows_html += f"""<tr>
@@ -338,10 +439,10 @@ async def dashboard():
             <td style="color:{gain_color}"><b>{gain_str}</b></td><td>{checked_str}</td>
         </tr>"""
 
-    total   = len(signals)
+    total = len(signals)
     checked = sum(1 for s in signals if s[7])
-    wins    = sum(1 for s in signals if s[6] and s[6] > 0)
-    hit     = f"{wins/checked*100:.1f}%" if checked > 0 else "N/A"
+    wins = sum(1 for s in signals if s[6] and s[6] > 0)
+    hit = f"{wins/checked*100:.1f}%" if checked > 0 else "N/A"
 
     return f"""<!DOCTYPE html>
 <html><head><title>Energy Detector Webhook</title>
@@ -370,13 +471,11 @@ async def dashboard():
 </table>
 </body></html>"""
 
-# ── MANUAL REPORT ENDPOINT ────────────────────────────────────────────────────
 @app.get("/report")
 async def manual_report(background_tasks: BackgroundTasks):
     background_tasks.add_task(send_weekly_report)
     return {"status": "Report generating and sending to Telegram..."}
 
-# ── OPTIMIZATION ENDPOINT ─────────────────────────────────────────────────────
 @app.get("/optimize")
 async def optimization_suggestions(background_tasks: BackgroundTasks):
     suggestions = analyze_for_optimization()
@@ -384,12 +483,10 @@ async def optimization_suggestions(background_tasks: BackgroundTasks):
     background_tasks.add_task(send_telegram, msg)
     return {"suggestions": suggestions}
 
-# ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "online", "time": datetime.utcnow().isoformat()}
 
-# ── MANUAL D+1 TRIGGER ────────────────────────────────────────────────────────
 @app.get("/check-d1")
 async def manual_d1_check(background_tasks: BackgroundTasks):
     background_tasks.add_task(check_d1_performance)
